@@ -12,16 +12,40 @@
     if (MOTION.test(String(url))) args[1] = 'data:,';
     return xopen.apply(this, args);
   };
+  // Diagnostics for bug reports: a short log of sign-in events that survives reloads, including the
+  // answers of Apple's sign-in service (auth.*.apple.com/auth/…, which sets the session cookies).
+  // Nothing runs on its own: an entry is written when such an event happens, __tv.diag() reads them.
+  // No tokens, cookie values or personal data are kept.
+  var DIAG = 'amtv.diag', diagLog = [];
+  try { diagLog = JSON.parse(localStorage.getItem(DIAG)) || []; } catch (e) {}
+  function diag(entry) {
+    entry.at = new Date().toISOString().slice(5, 19).replace('T', ' ');
+    diagLog.push(entry);
+    if (diagLog.length > 40) diagLog.splice(0, diagLog.length - 40);
+    try { localStorage.setItem(DIAG, JSON.stringify(diagLog)); } catch (e) {}
+  }
+  var AUTH = /^https:\/\/auth\.[a-z.]*apple\.com\/auth\//;
   var xfetch = window.fetch;
   window.fetch = function (input) {
-    var url = typeof input === 'string' ? input : input && input.url;
-    if (MOTION.test(String(url))) return Promise.resolve(new Response('', { status: 404 }));
-    return xfetch.apply(this, arguments);
+    var url = String(typeof input === 'string' ? input : (input && input.url) || input);
+    if (MOTION.test(url)) return Promise.resolve(new Response('', { status: 404 }));
+    var p = xfetch.apply(this, arguments);
+    if (AUTH.test(url)) {
+      var e = { ev: 'auth-service', url: url.replace(/\?.*/, '') };
+      p.then(function (r) {
+        e.status = r.status;
+        if (r.ok) return diag(e);
+        return r.clone().text().then(function (t) { e.body = t.slice(0, 200); diag(e); }, function () { diag(e); });
+      }, function (err) { e.error = String(err); diag(e); });
+    }
+    return p;
   };
   // (MainActivity opens the site on Search, which has none of that video in the first place.)
   var raf = window.requestAnimationFrame.bind(window), held = [], awakeUntil = 0;
 
   window.__amtv = {
+    diag: diag,
+    diagLog: function () { return diagLog.slice(); },
     // Let the now-playing background move for a while: the player just opened, or a new track
     // brought new colours. Frames it asked for while frozen are handed over now.
     wake: function (ms) {

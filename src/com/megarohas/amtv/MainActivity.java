@@ -119,7 +119,7 @@ public class MainActivity extends Activity {
         // Once per document: the site's own router (pushState) also fires onPageFinished, and
         // re-running the scripts would tear the interface down and build it again.
         signinJs = raw("signin");
-        pageJs = "if(!window.__amtvLoaded){window.__amtvLoaded=true;\n" + raw("page") + "\n" + raw("brand") + "\n" + raw("tv_core")
+        pageJs = "window.__amtvVersion=" + js(versionName()) + ";\nif(!window.__amtvLoaded){window.__amtvLoaded=true;\n" + raw("page") + "\n" + raw("brand") + "\n" + raw("tv_core")
                 + "\n" + raw("tv_screens") + "\n" + raw("tv_player") + "\nwindow.__tv&&__tv.boot();\n}";
         web.loadUrl(home());
         playFrom(getIntent());
@@ -395,6 +395,14 @@ public class MainActivity extends Activity {
             ((ViewGroup) v.getParent()).removeView(v);
         });
         Log.i(TAG, "splash off");
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            return "?";
+        }
     }
 
     /** A script from res/raw, or "" when a build leaves it out. */

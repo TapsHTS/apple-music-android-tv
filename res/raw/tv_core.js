@@ -52,6 +52,7 @@
 "Собираю главную…": "Building Home…",
 "Нужен вход в Apple ID": "Sign-in needed",
 "Вы вошли в Apple Music": "Signed in to Apple Music",
+"Вход в Apple Music слетел — войдите снова": "You were signed out of Apple Music — please sign in again",
 "Откроется вход Apple: ↑ ↓ — выбрать поле или кнопку, OK — ввести или нажать.": "Apple’s sign-in opens: ↑ ↓ choose a field or button, OK to type or press.",
 "Войти": "Sign In",
 "Ещё": "More",
@@ -862,6 +863,7 @@ h2 { font-size: 18px; font-weight: 600; margin: 0 48px 4px; color: #f2f2f5; whit
       T.onPlay && T.onPlay(x);
     } catch (e) {
       console.log('amtv play', e);
+      diag({ ev: 'play-failed', code: String(e && (e.errorCode || e.message) || e).slice(0, 80) });
       T.toast(T.t('Не получилось включить: ') + T.plain(e && (e.errorCode || e.message) || e));
     } finally {
       T.busy(false, el);
@@ -1102,20 +1104,62 @@ h2 { font-size: 18px; font-weight: 600; margin: 0 48px 4px; color: #f2f2f5; whit
     mk.setQueue = (q) => { perf('setQueue ' + JSON.stringify(q).slice(0, 60)); return sq(q).then((r) => { perf('setQueue done'); return r; }); };
   }
 
-  // The account's storefront, told to the app: it reopens the site there when the site opened in
-  // another one (an account from India on the site's US default can't play anything: CONTENT_EQUIVALENT).
+  // Sign-in events and Apple's sign-in service answers (page.js) go to a small log kept across reloads.
+  const diag = (e) => { try { window.__amtv && __amtv.diag && __amtv.diag(e); } catch (x) {} };
+  const mkState = (mk) => ({ signedIn: !!mk.isAuthorized, previewOnly: !!mk.previewOnly,
+    site: mk.storefrontId, account: mk.storefrontCountryCode });
+
+  // The site opens in a storefront picked from the browser's language (US on most TVs), but MusicKit
+  // plays only in the account's own: an account from India gets CONTENT_EQUIVALENT for everything.
+  // MusicKit switches storefronts in place, so the screens are just built again; the app remembers it
+  // and opens that storefront from the next start on (reopening the site only if the switch fails).
+  const SF_KEY = 'amtv.account.storefront';
   async function checkStorefront(mk) {
-    if (!native.storefront || !mk.isAuthorized) return;
+    if (!mk.isAuthorized) return;
     try {
       const r = await T.send('GET', '/v1/me/storefront');
-      const sf = r && r.data && r.data[0] && r.data[0].id;
-      if (sf) native.storefront(String(sf).toLowerCase(), String(mk.storefrontId || '').toLowerCase());
+      const sf = String((r && r.data && r.data[0] && r.data[0].id) || '').toLowerCase();
+      if (!/^[a-z]{2}$/.test(sf)) return;
+      try { localStorage.setItem(SF_KEY, sf); } catch (e) {}
+      const was = String(mk.storefrontId || '').toLowerCase();
+      if (sf !== was) {
+        diag({ ev: 'storefront', from: was, to: sf });
+        try { mk.storefrontId = sf; } catch (e) {}
+        if (String(mk.storefrontId).toLowerCase() === sf) rebuildScreens();
+      }
+      if (native.storefront) native.storefront(sf, String(mk.storefrontId || '').toLowerCase());
     } catch (e) {
       console.log('amtv storefront', e);
     }
   }
+  // Catalog ids and editorial are per storefront: every screen but Now Playing is built again.
+  function rebuildScreens() {
+    cache.clear();
+    for (const k of Object.keys(stacks)) {
+      if (k === 'now') continue;
+      for (const s of stacks[k]) drop(s);
+      delete stacks[k];
+    }
+    if (tab !== 'now') { tab = null; if (T.visible && !signinEl) T.show(); }
+  }
+  // Before playing a launch command, the storefront must be right; checked first unless already known.
+  async function storefrontThenPlay(mk) {
+    let known = null;
+    try { known = localStorage.getItem(SF_KEY); } catch (e) {}
+    if (mk.isAuthorized && known !== String(mk.storefrontId || '').toLowerCase()) await checkStorefront(mk);
+    else checkStorefront(mk);
+    T.flushPlay();
+  }
 
-  let signinEl = null;
+  // Apple can end a session later (its sign-in service refused it): MusicKit then quietly plays
+  // 90-second previews. Back to the sign-in screen instead, saying so; a moment's grace first.
+  let signinEl = null, outTimer = 0;
+  function signedOut(mk) {
+    if (mk.isAuthorized || signinEl) return;
+    if (mk.playbackState === 2) mk.pause();
+    T.signin();
+    T.toast(T.t('Вход в Apple Music слетел — войдите снова'));
+  }
   T.boot = async function () {
     const mk = T.mk();
     if (!mk) return setTimeout(T.boot, 300);
@@ -1123,17 +1167,20 @@ h2 { font-size: 18px; font-weight: 600; margin: 0 48px 4px; color: #f2f2f5; whit
     T.booting = true;
     T.status(T.t('Проверяю вход в Apple ID…'));
     await settled(mk);
+    diag(Object.assign({ ev: 'start', path: location.pathname }, mkState(mk)));
     T.status(mk.isAuthorized ? T.t('Собираю главную…') : T.t('Нужен вход в Apple ID'));
     T.on('playbackStateDidChange', onState);
     onState();
     T.on('authorizationStatusDidChange', () => {
-      if (!mk.isAuthorized) return;
+      diag(Object.assign({ ev: mk.isAuthorized ? 'signed-in' : 'signed-out' }, mkState(mk)));
+      clearTimeout(outTimer);
+      if (!mk.isAuthorized) { outTimer = setTimeout(() => signedOut(mk), 3000); return; }
       cache.clear();
       if (signinEl) { signinEl.remove(); signinEl = null; nav.hidden = false; T.toast(T.t('Вы вошли в Apple Music')); }
       T.show();
-      T.flushPlay();
-      checkStorefront(mk);
+      storefrontThenPlay(mk);
     });
+    T.on('authReflectionDidComplete', () => diag(Object.assign({ ev: 'session-cookies-done' }, mkState(mk))));
     T.booted = true;
     try { performance.setResourceTimingBufferSize(4000); } catch (e) {}   // for diagnosing slow starts
     watchStarts(mk);
@@ -1141,8 +1188,30 @@ h2 { font-size: 18px; font-weight: 600; margin: 0 48px 4px; color: #f2f2f5; whit
     [0, 3000, 8000, 15000].forEach((ms) => setTimeout(T.paintIcons, ms));
     if (mk.isAuthorized) T.show();
     else T.signin();
-    T.flushPlay();
-    checkStorefront(mk);
+    storefrontThenPlay(mk);
+  };
+
+  // For a bug report, from DevTools: copy(__tv.diag()). What the app knows about the sign-in and the
+  // storefront, the log above and Apple requests that failed. No tokens, cookie values or personal data.
+  T.diag = function () {
+    const mk = T.mk() || {};
+    const ua = navigator.userAgentData;
+    const failed = performance.getEntriesByType('resource')
+      .filter((e) => e.responseStatus >= 400 && /\.apple\.com\//.test(e.name))
+      .slice(-20).map((e) => e.responseStatus + ' ' + e.name.replace(/\?.*/, ''));
+    const log = (window.__amtv && __amtv.diagLog && __amtv.diagLog()) || [];
+    return [
+      'AMTV ' + (window.__amtvVersion || '?') + ' · ' + location.pathname + ' · up ' + Math.round(performance.now() / 1000) + ' s',
+      'browser: ' + navigator.userAgent,
+      'client hints: ' + (ua ? ua.platform + ', mobile=' + ua.mobile + ', ' + ua.brands.map((b) => b.brand + ' ' + b.version).join(' / ') : 'none'),
+      'languages: ' + (navigator.languages || []).join(', '),
+      'musickit: ' + JSON.stringify(Object.assign(mkState(mk), { hasUserToken: !!mk.musicUserToken, playbackState: mk.playbackState })),
+      'cookies (names only): ' + document.cookie.split(';').map((c) => c.trim().split('=')[0]).filter(Boolean).join(', '),
+      'log:',
+      ...log.map((e) => '  ' + JSON.stringify(e)),
+      'failed Apple requests (this page): ' + (failed.length ? '' : 'none'),
+      ...failed.map((f) => '  ' + f),
+    ].join('\n');
   };
 
   // Not signed in: one big button that hands over to Apple's own sign-in on the site (cursor mode).
