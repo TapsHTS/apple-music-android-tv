@@ -38,7 +38,7 @@ $(APK): AndroidManifest.xml $(SRC) $(RES) $(ASSETS)
 	$(BT)/aapt2 link -I $(PLATFORM) --manifest $(B)/AndroidManifest.xml $(if $(DEV),--rename-manifest-package $(PKG)) \
 		-A assets -o $(B)/app.unsigned.apk $(B)/res.zip
 	javac -source 8 -target 8 -Xlint:-options -encoding UTF-8 -bootclasspath $(PLATFORM):$(BT)/core-lambda-stubs.jar -d $(B)/classes $(SRC)
-	$(BT)/d8 --release --min-api 29 --lib $(PLATFORM) --output $(B) $$(find $(B)/classes -name '*.class')
+	$(BT)/d8 --release --min-api 28 --lib $(PLATFORM) --output $(B) $$(find $(B)/classes -name '*.class')
 	cd $(B) && zip -q app.unsigned.apk classes.dex
 	$(BT)/zipalign -f -p 4 $(B)/app.unsigned.apk $(B)/app.aligned.apk
 	$(BT)/apksigner sign --ks $(KEYSTORE) --ks-pass pass:android --ks-key-alias androiddebugkey \
